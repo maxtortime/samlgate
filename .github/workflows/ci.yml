@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Windows only for now — macOS and Linux are not supported yet
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Test (includes a headless-browser capture test with the preinstalled Edge)
+        run: dotnet test samlgate.slnx -c Release --logger "console;verbosity=normal"
+      - name: NativeAOT build stays warning-free
+        run: dotnet publish src/Samlgate/Samlgate.csproj -c Release -r win-x64 -o out -p:TreatWarningsAsErrors=true
+      - run: ./out/samlgate.exe --version

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Samlgate.Core/Samlgate.Core.csproj" />
+    <Project Path="src/Samlgate/Samlgate.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Samlgate.Core.Tests/Samlgate.Core.Tests.csproj" />
+  </Folder>
+</Solution>

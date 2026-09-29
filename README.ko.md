@@ -1,0 +1,148 @@
+# samlgate
+
+**브라우저 SAML 로그인으로 AWS 자격증명을 발급받는 CLI — saml2aws Browser provider의 `saml2aws login` 대체재.**
+
+[English](README.md)
+
+> samlgate의 명령 출력과 오류 메시지는 영어로만 나옵니다.
+
+samlgate는 IdP 로그인(Microsoft Entra ID, Okta, Google Workspace 등)을 실제 브라우저에서 진행시키고,
+AWS로 향하는 SAML assertion을 중간에서 받아 STS로 임시 자격증명을 발급받은 뒤 `~/.aws/credentials`에
+saml2aws와 같은 형식으로 기록합니다. 런타임·Playwright·브라우저 드라이버 다운로드 없는 약 7MB 단일 네이티브 바이너리입니다.
+
+이런 조직을 위해 만들었습니다.
+
+- **상위 조직이나 파트너에게 AWS 계정 한두 개를 배정받아 쓰는** 곳이라 **IAM Identity Center를 쓸 수 없고**,
+- 사람은 **Microsoft Entra ID**의 *AWS Single-Account Access* 엔터프라이즈 앱(SAML)으로 관리해서,
+  로그인이 터미널 비밀번호 입력이 아니라 브라우저·MFA·조건부 액세스로 이뤄지는 곳.
+
+## 동작 방식
+
+SAML에는 `localhost` 콜백이 없습니다. 로그인이 끝나면 IdP가 브라우저로 하여금 `SAMLResponse`를 고정된 AWS 주소
+`https://signin.aws.amazon.com/saml`에 `POST`하게 합니다. samlgate는
+
+1. Edge/Chrome을 **전용 프로필**과 DevTools Protocol을 켠 채로 띄우고,
+2. 바로 그 ACS 요청(aws, aws-cn, aws-us-gov 파티션)만 가로채서 AWS로 보내지 않고,
+3. "창을 닫아도 됩니다" 로컬 페이지로 응답한 뒤 브라우저를 닫고,
+4. STS `AssumeRoleWithSAML`을 호출해 프로필을 기록합니다.
+
+전용 프로필에 IdP 쿠키가 남으므로 **로그인은 처음 한 번만** 하면 됩니다. 이후 자격증명이 만료되면 브라우저 창이
+몇 초 떴다 닫히는 정도로 갱신됩니다. (첫 Entra 로그인 때 **"로그인 상태를 유지하시겠습니까?"에 "예"**를 누르세요 —
+samlgate는 매번 브라우저를 닫기 때문에 세션 쿠키만 있으면 사라집니다.)
+
+## 설치
+
+> **현재는 Windows 전용입니다.** Windows x64·ARM64용 바이너리를 제공하며, Windows 11 x64에서 검증했습니다.
+> macOS와 Linux는 아직 지원하지 않습니다([로드맵](#로드맵) 참고).
+
+[Releases](https://github.com/platpharm/samlgate/releases)에서 `samlgate-<버전>-win-x64.zip`(또는 `win-arm64`)을 받아
+`samlgate.exe`를 `PATH`에 있는 폴더에 풉니다.
+
+소스 빌드: `dotnet publish src/Samlgate -c Release -r win-x64` (.NET 10 SDK, NativeAOT용 Visual Studio
+"C++를 사용한 데스크톱 개발" 워크로드 필요)
+
+**요구 사항:** Windows 기본 탑재 Microsoft Edge — 또는 Google Chrome, Brave, Chromium.
+
+## 빠른 시작
+
+```bash
+# 1. IdP 로그인 시작 URL 저장 (아래 "로그인 URL 찾기" 참고)
+samlgate configure --url "https://launcher.myapps.microsoft.com/api/signin/<app-id>?tenantId=<tenant-id>"
+
+# 2. 로그인 — ~/.aws/credentials에 [saml] 프로필 기록
+samlgate login
+
+# 3. 사용
+aws sts get-caller-identity --profile saml
+samlgate status
+```
+
+이미 saml2aws를 쓰고 있다면 1단계는 건너뛰세요 — `~/.samlgate`에 없는 계정은 `~/.saml2aws`에서 읽습니다.
+
+### 로그인 URL 찾기 (Microsoft Entra ID)
+
+Entra 관리 센터 → **엔터프라이즈 애플리케이션** → AWS 앱 → **속성** → **사용자 액세스 URL**.
+사용자는 [내 앱](https://myapps.microsoft.com)에서 앱 타일을 우클릭해 링크를 복사해도 됩니다.
+
+## 명령
+
+| 명령 | |
+|---|---|
+| `samlgate login` | 저장된 자격증명이 5분 안에 만료되면(또는 `--force`) 로그인하고 세션 정보를 출력 |
+| `samlgate status` | 세션 정보 출력. 유효하면 종료 코드 `0`, 아니면 `1` — 스크립트용 |
+| `samlgate configure --url …` | `~/.samlgate`에 계정 생성/수정 |
+| `samlgate credential-process` | [`credential_process`](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html) JSON으로 자격증명 출력 (필요하면 로그인) |
+| `samlgate exec -- <명령> …` | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`을 넣어 명령 실행 |
+
+공통 옵션: `-a/--idp-account <이름>`(설정 섹션, 기본 `default`), `-p/--profile <이름>`(credentials 프로필, 기본 `saml`),
+`--role <arn>`, `--region`, `--session-duration <초>`, `--browser edge|chrome|brave|chromium`, `--browser-path <실행 파일>`,
+`--timeout <초>`. 전체 목록은 `samlgate <명령> --help`.
+
+### 롤
+
+SAML 응답에는 IdP 앱에서 사용자에게 할당된 AWS IAM 롤이 모두 들어 있습니다. 하나면 그대로 쓰고, 여러 개면
+터미널에서 고르게 하며 계정별로 선택을 기억합니다. `role_arn` / `--role`로 고정할 수도 있습니다.
+
+### credential_process 사용
+
+samlgate가 기록하는 프로필과 **다른** 프로필에 연결하세요 (`~/.aws/credentials`에 정적 키가 있는 프로필은 그 키가 우선합니다).
+
+```ini
+# ~/.aws/config
+[profile work]
+credential_process = samlgate credential-process -a default
+region = ap-northeast-2
+```
+
+터미널이 연결되지 않은 상황에서는 롤을 물어볼 수 없습니다 — `role_arn`을 지정하거나 `samlgate login`을 한 번 실행해 선택을 기억시키세요.
+
+## 설정
+
+`~/.samlgate`(`SAMLGATE_CONFIG`로 변경 가능)는 계정마다 섹션이 하나인 INI 파일입니다. 키 이름이 saml2aws와 같아서
+`~/.saml2aws`를 그대로 복사해도 되고, 모르는 키는 무시합니다.
+
+| 키 | 기본값 | |
+|---|---|---|
+| `url` | — | IdP 로그인 시작 URL. saml2aws의 `provider = AzureAD` + `app_id`는 자동 변환 |
+| `aws_profile` | `saml` | 기록할 credentials 프로필 |
+| `role_arn` | — | 묻지 않고 사용할 롤 |
+| `region` | 파티션 기본값 (`us-east-1`) | STS 리전 |
+| `aws_session_duration` | assertion의 `SessionDuration`, 없으면 3600 | 롤 최대치보다 길면 3600으로 재시도 |
+| `credentials_file` | `~/.aws/credentials` | `AWS_SHARED_CREDENTIALS_FILE`도 반영 |
+| `browser_type` | Edge | `edge`/`msedge`, `chrome`, `brave`, `chromium` |
+| `browser_executable_path` | 자동 탐색 | |
+| `target_url` | AWS ACS URL | 추가로 가로챌 URL (커스텀 ACS) |
+
+credentials 프로필에는 saml2aws와 똑같이 `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`,
+`aws_security_token`, `x_principal_arn`, `x_security_token_expires`가 기록됩니다.
+
+`SAMLGATE_DATA_DIR`로 브라우저 프로필·기억한 롤의 위치를 바꿀 수 있습니다 (기본 `%LOCALAPPDATA%\samlgate`).
+
+## 보안
+
+- SAML assertion은 AWS STS로만 전송됩니다. 가로챈 ACS 요청은 로컬에서 응답합니다.
+- 브라우저 프로필은 평소 프로필과 분리되어 데이터 폴더에 있습니다. 지우면 로그아웃됩니다.
+- credentials 파일은 원자적으로 기록됩니다.
+- DevTools는 samlgate 실행 중에만 `127.0.0.1`의 임의 포트로 열립니다.
+- 텔레메트리 없음.
+
+## 로드맵
+
+- macOS 지원 (Chromium이 없으면 Safari 엔진 — 네이티브 WKWebView 창)
+- Linux 지원
+- WebDriver BiDi로 Firefox 지원
+- IdP 세션이 살아 있으면 헤드리스로 먼저 시도 (창이 아예 안 뜨게)
+
+## 개발
+
+```bash
+dotnet test samlgate.slnx          # 단위 테스트 + (Edge/Chrome이 있으면) 헤드리스 브라우저 가로채기 테스트
+dotnet run --project src/Samlgate -- help
+```
+
+`src/Samlgate.Core`에 테스트 가능한 로직(설정, SAML 파싱, STS, credentials 파일, DevTools 가로채기)이 모두 있고
+`src/Samlgate`는 얇은 CLI입니다(System.CommandLine). STS는 AWSSDK.SecurityToken으로 호출합니다.
+
+## 라이선스
+
+[MIT](LICENSE)
